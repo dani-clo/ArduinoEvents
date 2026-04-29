@@ -1,0 +1,23 @@
+{
+  "name": "ZephyrEvents",
+  "keywords": "Zephyr,events",
+  "description": "Arduino class to implement and use events in Zephyr.",
+  "authors":
+  [
+    {
+      "name": "Daniele Cloralio",
+      "email": "daniele.cloralio@gmail.com",
+      "maintainer": true
+    }
+  ],
+  "repository":
+  {
+    "type": "git",
+    "url": "https://github.com/dani-clo/ZephyrEvents.git"
+  },
+  "version": "0.1.0",
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "headers": "ZephyrEvents.h"
+}
