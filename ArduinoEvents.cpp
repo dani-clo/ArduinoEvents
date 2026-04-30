@@ -2,24 +2,100 @@
 
 #include <algorithm>
 #include <any>
-#include <chrono>
-#include <deque>
 #include <memory>
-#include <mutex>
+#include <new>
 #include <unordered_map>
 #include <vector>
+
+#if __has_include(<zephyr/kernel.h>)
+#include <zephyr/kernel.h>
+#else
+#error "This library requires Zephyr environment."
+#endif
 
 namespace arduino_events {
 namespace {
 
+template <typename MutexT>
+class LockGuard {
+ public:
+	 explicit LockGuard(MutexT& mutex) : mutex_(mutex) {
+		mutex_.lock();
+	 }
+
+	 ~LockGuard() {
+		mutex_.unlock();
+	 }
+
+	 LockGuard(const LockGuard&) = delete;
+	 LockGuard& operator=(const LockGuard&) = delete;
+
+ private:
+	 MutexT& mutex_;
+};
+
+struct RuntimeMutex {
+	 RuntimeMutex() {
+		k_mutex_init(&mutex_);
+	 }
+
+	 void lock() {
+		(void)k_mutex_lock(&mutex_, K_FOREVER);
+	 }
+
+	 bool try_lock() {
+		return k_mutex_lock(&mutex_, K_NO_WAIT) == 0;
+	 }
+
+	 void unlock() {
+		(void)k_mutex_unlock(&mutex_);
+	 }
+
+ private:
+	 struct k_mutex mutex_;
+};
+
+	struct QueuedCallback {
+		void (*invoke)(void*) = nullptr;
+		void (*destroy)(void*) = nullptr;
+		void* context = nullptr;
+	};
+
+	struct CallbackPayload {
+		std::function<void()> callback;
+	};
+
+	void invokeCallbackPayload(void* context) {
+		auto* payload = static_cast<CallbackPayload*>(context);
+		payload->callback();
+	}
+
+	void destroyCallbackPayload(void* context) {
+		auto* payload = static_cast<CallbackPayload*>(context);
+		payload->~CallbackPayload();
+		k_free(payload);
+	}
+
+	struct TimerEntry {
+		uint32_t id = 0;
+		uint32_t periodMs = 0;
+		bool repeat = false;
+		bool cancelled = true;
+		bool active = false;
+		bool pending = false;
+		uint32_t generation = 0;
+		std::function<void()> callback;
+		struct k_work_delayable work;
+	};
+
+	struct RuntimeState;
+
+	bool pushCallbackLocked(RuntimeState& state, std::function<void()> callback);
+	void drainCallbackQueueLocked(RuntimeState& state);
+	void timerWorkHandler(struct k_work* work);
+
 uint64_t nowMs() {
-#if __has_include(<Arduino.h>)
-	return static_cast<uint64_t>(millis());
-#else
-	using namespace std::chrono;
-	return static_cast<uint64_t>(
-			duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
-#endif
+		return k_cyc_to_ms_floor64(static_cast<uint64_t>(sys_clock_cycle_get_32()));
 }
 
 struct HandlerEntry {
@@ -28,15 +104,6 @@ struct HandlerEntry {
 	std::function<void(const void*)> handler;
 	bool once = false;
 	bool removed = false;
-};
-
-struct TimerEntry {
-	uint32_t id = 0;
-	uint64_t dueAtMs = 0;
-	uint32_t periodMs = 0;
-	bool repeat = false;
-	bool cancelled = false;
-	std::function<void()> callback;
 };
 
 struct FutureState {
@@ -58,18 +125,98 @@ struct RuntimeState {
 	uint32_t nextSubscriptionId = 1;
 	uint32_t nextTimerId = 1;
 	uint32_t nextFutureToken = 1;
+	uint32_t timerGeneration = 0;
 
 	std::vector<HandlerEntry> handlers;
-	std::vector<TimerEntry> timers;
+	std::vector<std::unique_ptr<TimerEntry>> timers;
 	std::unordered_map<uint32_t, std::shared_ptr<FutureState>> futures;
-	std::deque<std::function<void()>> callbackQueue;
 
-	mutable std::mutex mutex;
+	struct k_msgq callbackQueue;
+	std::vector<char> callbackQueueStorage;
+	bool callbackQueueReady = false;
+
+	mutable RuntimeMutex mutex;
 };
 
 RuntimeState& rt() {
 	static RuntimeState s;
 	return s;
+}
+
+bool pushCallbackLocked(RuntimeState& state, std::function<void()> callback) {
+	if (!state.callbackQueueReady) {
+		return false;
+	}
+
+	void* rawPayload = k_malloc(sizeof(CallbackPayload));
+	if (rawPayload == nullptr) {
+		return false;
+	}
+
+	auto* payload = new (rawPayload) CallbackPayload{std::move(callback)};
+	QueuedCallback queued;
+	queued.invoke = invokeCallbackPayload;
+	queued.destroy = destroyCallbackPayload;
+	queued.context = payload;
+
+	if (k_msgq_put(&state.callbackQueue, &queued, K_NO_WAIT) != 0) {
+		destroyCallbackPayload(payload);
+		return false;
+	}
+
+	return true;
+}
+
+void drainCallbackQueueLocked(RuntimeState& state) {
+	if (!state.callbackQueueReady) {
+		return;
+	}
+
+	QueuedCallback queued;
+	while (k_msgq_get(&state.callbackQueue, &queued, K_NO_WAIT) == 0) {
+		if (queued.destroy != nullptr && queued.context != nullptr) {
+			queued.destroy(queued.context);
+		}
+	}
+}
+
+void timerWorkHandler(struct k_work* work) {
+	auto* delayable = k_work_delayable_from_work(work);
+	auto* timer = CONTAINER_OF(delayable, TimerEntry, work);
+	auto& state = rt();
+
+	LockGuard<RuntimeMutex> lock(state.mutex);
+	if (!timer->pending) {
+		return;
+	}
+
+	if (!state.running || !timer->active || timer->cancelled ||
+				timer->generation != state.timerGeneration) {
+		timer->pending = false;
+		timer->active = false;
+		timer->cancelled = true;
+		timer->callback = nullptr;
+		return;
+	}
+
+	(void)pushCallbackLocked(state, timer->callback);
+
+	if (timer->repeat && !timer->cancelled) {
+		const int rc = k_work_reschedule_for_queue(
+				&k_sys_work_q, &timer->work, K_MSEC(timer->periodMs));
+		if (rc < 0) {
+			timer->pending = false;
+			timer->active = false;
+			timer->cancelled = true;
+			timer->callback = nullptr;
+		}
+		return;
+	}
+
+	timer->pending = false;
+	timer->active = false;
+	timer->cancelled = true;
+	timer->callback = nullptr;
 }
 
 void queueFutureCallbacksLocked(RuntimeState& state, const std::shared_ptr<FutureState>& fs) {
@@ -92,27 +239,24 @@ void queueFutureCallbacksLocked(RuntimeState& state, const std::shared_ptr<Futur
 
 	if (runSuccess) {
 		for (auto& cb : successHandlers) {
-			if (state.callbackQueue.size() >= state.config.eventQueueCapacity) {
+			if (!pushCallbackLocked(state, [cb = std::move(cb), payload]() { cb(*payload); })) {
 				break;
 			}
-			state.callbackQueue.push_back([cb = std::move(cb), payload]() { cb(*payload); });
 		}
 	}
 
 	if (runError) {
 		for (auto& cb : errorHandlers) {
-			if (state.callbackQueue.size() >= state.config.eventQueueCapacity) {
+			if (!pushCallbackLocked(state, [cb = std::move(cb), err]() { cb(err); })) {
 				break;
 			}
-			state.callbackQueue.push_back([cb = std::move(cb), err]() { cb(err); });
 		}
 	}
 
 	for (auto& cb : finallyHandlers) {
-		if (state.callbackQueue.size() >= state.config.eventQueueCapacity) {
+		if (!pushCallbackLocked(state, std::move(cb))) {
 			break;
 		}
-		state.callbackQueue.push_back(std::move(cb));
 	}
 }
 
@@ -214,11 +358,51 @@ Runtime::Runtime() = default;
 
 bool Runtime::begin(const Config& config) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
+	drainCallbackQueueLocked(state);
 
 	state.config = config;
 	if (state.config.eventQueueCapacity == 0) {
 		state.config.eventQueueCapacity = 1;
+	}
+	if (state.config.workerQueueCapacity == 0) {
+		state.config.workerQueueCapacity = 1;
+	}
+
+	const size_t msgSize = sizeof(QueuedCallback);
+	state.callbackQueueStorage.assign(state.config.eventQueueCapacity * msgSize, 0);
+	k_msgq_init(&state.callbackQueue, state.callbackQueueStorage.data(), msgSize,
+						state.config.eventQueueCapacity);
+	state.callbackQueueReady = true;
+
+	if (state.timerGeneration == 0) {
+		state.timerGeneration = 1;
+	} else {
+		++state.timerGeneration;
+		if (state.timerGeneration == 0) {
+			state.timerGeneration = 1;
+		}
+	}
+
+	if (state.timers.size() != state.config.workerQueueCapacity) {
+		state.timers.clear();
+		state.timers.reserve(state.config.workerQueueCapacity);
+		for (size_t i = 0; i < state.config.workerQueueCapacity; ++i) {
+			auto timer = std::make_unique<TimerEntry>();
+			timer->generation = state.timerGeneration;
+			k_work_init_delayable(&timer->work, timerWorkHandler);
+			state.timers.push_back(std::move(timer));
+		}
+	} else {
+		for (auto& timer : state.timers) {
+			timer->id = 0;
+			timer->periodMs = 0;
+			timer->repeat = false;
+			timer->cancelled = true;
+			timer->active = false;
+			timer->generation = state.timerGeneration;
+			timer->callback = nullptr;
+		}
 	}
 
 	state.running = true;
@@ -226,25 +410,27 @@ bool Runtime::begin(const Config& config) {
 	state.nextTimerId = 1;
 	state.nextFutureToken = 1;
 	state.handlers.clear();
-	state.timers.clear();
 	state.futures.clear();
-	state.callbackQueue.clear();
 	return true;
 }
 
 void Runtime::end() {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	state.running = false;
 	state.handlers.clear();
-	state.timers.clear();
+	for (auto& timer : state.timers) {
+		timer->cancelled = true;
+		timer->active = false;
+		timer->callback = nullptr;
+	}
 	state.futures.clear();
-	state.callbackQueue.clear();
+	drainCallbackQueueLocked(state);
 }
 
 bool Runtime::isRunning() const {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	return state.running;
 }
 
@@ -253,28 +439,12 @@ void Runtime::update(uint32_t budgetMs) {
 	const uint64_t startedAt = nowMs();
 
 	{
-		std::lock_guard<std::mutex> lock(state.mutex);
+		LockGuard<RuntimeMutex> lock(state.mutex);
 		if (!state.running) {
 			return;
 		}
 
 		const uint64_t now = nowMs();
-
-		for (auto& timer : state.timers) {
-			if (timer.cancelled || timer.dueAtMs > now) {
-				continue;
-			}
-
-			if (state.callbackQueue.size() < state.config.eventQueueCapacity) {
-				state.callbackQueue.push_back(timer.callback);
-			}
-
-			if (timer.repeat) {
-				timer.dueAtMs = now + timer.periodMs;
-			} else {
-				timer.cancelled = true;
-			}
-		}
 
 		for (auto& item : state.futures) {
 			auto& fs = item.second;
@@ -290,24 +460,24 @@ void Runtime::update(uint32_t budgetMs) {
 			queueFutureCallbacksLocked(state, fs);
 		}
 
-		state.timers.erase(
-				std::remove_if(state.timers.begin(), state.timers.end(),
-											 [](const TimerEntry& timer) { return timer.cancelled; }),
-				state.timers.end());
 	}
 
 	while (true) {
-		std::function<void()> callback;
+		QueuedCallback queued;
 		{
-			std::lock_guard<std::mutex> lock(state.mutex);
-			if (state.callbackQueue.empty()) {
+			LockGuard<RuntimeMutex> lock(state.mutex);
+			if (!state.callbackQueueReady ||
+					k_msgq_get(&state.callbackQueue, &queued, K_NO_WAIT) != 0) {
 				break;
 			}
-			callback = std::move(state.callbackQueue.front());
-			state.callbackQueue.pop_front();
 		}
 
-		callback();
+		if (queued.invoke != nullptr && queued.context != nullptr) {
+			queued.invoke(queued.context);
+		}
+		if (queued.destroy != nullptr && queued.context != nullptr) {
+			queued.destroy(queued.context);
+		}
 
 		if (budgetMs > 0 && (nowMs() - startedAt) >= budgetMs) {
 			break;
@@ -317,7 +487,7 @@ void Runtime::update(uint32_t budgetMs) {
 
 Subscription Runtime::registerHandler(size_t eventTypeId, RawEventHandler handler, bool once) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	if (!state.running) {
 		return {};
 	}
@@ -339,7 +509,7 @@ bool Runtime::emitRaw(size_t eventTypeId, const void* eventData, size_t eventSiz
 	std::vector<std::function<void(const void*)>> toRun;
 
 	{
-		std::lock_guard<std::mutex> lock(state.mutex);
+		LockGuard<RuntimeMutex> lock(state.mutex);
 		if (!state.running) {
 			return false;
 		}
@@ -383,7 +553,7 @@ bool Runtime::off(Subscription subscription) {
 	}
 
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = std::find_if(state.handlers.begin(), state.handlers.end(),
 												 [&](const HandlerEntry& h) { return h.id == subscription.id; });
 	if (it == state.handlers.end()) {
@@ -396,44 +566,83 @@ bool Runtime::off(Subscription subscription) {
 
 uint32_t Runtime::after(uint32_t delayMs, std::function<void()> callback) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	if (!state.running) {
 		return 0;
 	}
 
-	TimerEntry timer;
-	timer.id = state.nextTimerId++;
-	timer.dueAtMs = nowMs() + delayMs;
-	timer.periodMs = delayMs;
-	timer.repeat = false;
-	timer.callback = std::move(callback);
-	state.timers.push_back(std::move(timer));
-	return state.timers.back().id;
+	for (auto& timer : state.timers) {
+		if (timer->active || timer->pending) {
+			continue;
+		}
+
+		timer->id = state.nextTimerId++;
+		timer->periodMs = delayMs;
+		timer->repeat = false;
+		timer->cancelled = false;
+		timer->active = true;
+		timer->pending = true;
+		timer->generation = state.timerGeneration;
+		timer->callback = std::move(callback);
+
+		const int rc = k_work_schedule_for_queue(&k_sys_work_q, &timer->work, K_MSEC(delayMs));
+		if (rc < 0) {
+			timer->cancelled = true;
+			timer->active = false;
+			timer->pending = false;
+			timer->callback = nullptr;
+			return 0;
+		}
+
+		return timer->id;
+	}
+
+	return 0;
 }
 
 uint32_t Runtime::every(uint32_t periodMs, std::function<void()> callback) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	if (!state.running || periodMs == 0) {
 		return 0;
 	}
 
-	TimerEntry timer;
-	timer.id = state.nextTimerId++;
-	timer.dueAtMs = nowMs() + periodMs;
-	timer.periodMs = periodMs;
-	timer.repeat = true;
-	timer.callback = std::move(callback);
-	state.timers.push_back(std::move(timer));
-	return state.timers.back().id;
+	for (auto& timer : state.timers) {
+		if (timer->active || timer->pending) {
+			continue;
+		}
+
+		timer->id = state.nextTimerId++;
+		timer->periodMs = periodMs;
+		timer->repeat = true;
+		timer->cancelled = false;
+		timer->active = true;
+		timer->pending = true;
+		timer->generation = state.timerGeneration;
+		timer->callback = std::move(callback);
+
+		const int rc = k_work_schedule_for_queue(&k_sys_work_q, &timer->work, K_MSEC(periodMs));
+		if (rc < 0) {
+			timer->cancelled = true;
+			timer->active = false;
+			timer->pending = false;
+			timer->callback = nullptr;
+			return 0;
+		}
+
+		return timer->id;
+	}
+
+	return 0;
 }
 
 bool Runtime::cancelTimer(uint32_t timerId) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	for (auto& timer : state.timers) {
-		if (timer.id == timerId) {
-			timer.cancelled = true;
+		if ((timer->active || timer->pending) && timer->id == timerId) {
+			timer->cancelled = true;
+			timer->active = false;
 			return true;
 		}
 	}
@@ -480,7 +689,7 @@ Future<void> Runtime::defer(std::function<void(Deferred<void>)> start) {
 
 void Runtime::futureOnSuccess(uint32_t token, std::function<void(const std::any&)> onSuccess) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	if (it == state.futures.end() || !it->second) {
 		return;
@@ -489,10 +698,8 @@ void Runtime::futureOnSuccess(uint32_t token, std::function<void(const std::any&
 	auto& fs = it->second;
 	if (fs->ready && !fs->hasError && !fs->cancelled) {
 		auto payload = std::make_shared<std::any>(fs->value);
-		if (state.callbackQueue.size() < state.config.eventQueueCapacity) {
-			state.callbackQueue.push_back(
-					[cb = std::move(onSuccess), payload]() mutable { cb(*payload); });
-		}
+		(void)pushCallbackLocked(state,
+				[cb = std::move(onSuccess), payload]() mutable { cb(*payload); });
 		return;
 	}
 
@@ -503,7 +710,7 @@ void Runtime::futureOnSuccess(uint32_t token, std::function<void(const std::any&
 
 void Runtime::futureOnError(uint32_t token, std::function<void(const Error&)> onError) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	if (it == state.futures.end() || !it->second) {
 		return;
@@ -512,9 +719,7 @@ void Runtime::futureOnError(uint32_t token, std::function<void(const Error&)> on
 	auto& fs = it->second;
 	if (fs->ready && (fs->hasError || fs->cancelled)) {
 		const Error err = fs->error;
-		if (state.callbackQueue.size() < state.config.eventQueueCapacity) {
-			state.callbackQueue.push_back([cb = std::move(onError), err]() { cb(err); });
-		}
+		(void)pushCallbackLocked(state, [cb = std::move(onError), err]() { cb(err); });
 		return;
 	}
 
@@ -525,7 +730,7 @@ void Runtime::futureOnError(uint32_t token, std::function<void(const Error&)> on
 
 void Runtime::futureOnFinally(uint32_t token, std::function<void()> onFinally) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	if (it == state.futures.end() || !it->second) {
 		return;
@@ -533,9 +738,7 @@ void Runtime::futureOnFinally(uint32_t token, std::function<void()> onFinally) {
 
 	auto& fs = it->second;
 	if (fs->ready) {
-		if (state.callbackQueue.size() < state.config.eventQueueCapacity) {
-			state.callbackQueue.push_back(std::move(onFinally));
-		}
+		(void)pushCallbackLocked(state, std::move(onFinally));
 		return;
 	}
 
@@ -544,7 +747,7 @@ void Runtime::futureOnFinally(uint32_t token, std::function<void()> onFinally) {
 
 void Runtime::futureSetTimeout(uint32_t token, uint32_t timeoutMs) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	if (it == state.futures.end() || !it->second || it->second->ready) {
 		return;
@@ -559,7 +762,7 @@ void Runtime::futureSetTimeout(uint32_t token, uint32_t timeoutMs) {
 
 bool Runtime::futureCancel(uint32_t token) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	if (it == state.futures.end() || !it->second || it->second->ready) {
 		return false;
@@ -577,21 +780,21 @@ bool Runtime::futureCancel(uint32_t token) {
 
 bool Runtime::futureIsReady(uint32_t token) const {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	return it != state.futures.end() && it->second && it->second->ready;
 }
 
 bool Runtime::futureHasError(uint32_t token) const {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	return it != state.futures.end() && it->second && it->second->ready && it->second->hasError;
 }
 
 bool Runtime::futureIsCancelled(uint32_t token) const {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	return it != state.futures.end() && it->second && it->second->cancelled;
 }
@@ -599,7 +802,7 @@ bool Runtime::futureIsCancelled(uint32_t token) const {
 bool Runtime::futureTryGetAny(uint32_t token, std::any& outValue, Error& outError,
 															bool& outHasError) const {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	if (it == state.futures.end() || !it->second || !it->second->ready) {
 		return false;
@@ -616,7 +819,7 @@ bool Runtime::futureTryGetAny(uint32_t token, std::any& outValue, Error& outErro
 
 bool Runtime::futureResolveAny(uint32_t token, std::any value) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	if (it == state.futures.end() || !it->second || it->second->ready) {
 		return false;
@@ -633,7 +836,7 @@ bool Runtime::futureResolveAny(uint32_t token, std::any value) {
 
 bool Runtime::futureReject(uint32_t token, Error error) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	auto it = state.futures.find(token);
 	if (it == state.futures.end() || !it->second || it->second->ready) {
 		return false;
@@ -650,7 +853,7 @@ bool Runtime::futureReject(uint32_t token, Error error) {
 
 uint32_t Runtime::allocFutureToken() {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
+	LockGuard<RuntimeMutex> lock(state.mutex);
 	if (!state.running) {
 		return 0;
 	}
@@ -662,13 +865,12 @@ uint32_t Runtime::allocFutureToken() {
 
 bool Runtime::enqueue(std::function<void()> callback) {
 	auto& state = rt();
-	std::lock_guard<std::mutex> lock(state.mutex);
-	if (!state.running || state.callbackQueue.size() >= state.config.eventQueueCapacity) {
+	LockGuard<RuntimeMutex> lock(state.mutex);
+	if (!state.running) {
 		return false;
 	}
 
-	state.callbackQueue.push_back(std::move(callback));
-	return true;
+	return pushCallbackLocked(state, std::move(callback));
 }
 
 }  // namespace arduino_events
