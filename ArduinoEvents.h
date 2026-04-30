@@ -14,7 +14,7 @@ using String = std::string;
 #include <type_traits>
 #include <utility>
 
-namespace zephyr_events {
+namespace arduino_events {
 
 struct Config {
 	size_t eventQueueCapacity = 32;
@@ -426,5 +426,5 @@ Future<T> Runtime::createDeferred(std::function<void(Deferred<T>)> start) {
 	return Future<T>(token);
 }
 
-}  // namespace zephyr_events
+}  // namespace arduino_events
 

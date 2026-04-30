@@ -1,4 +1,4 @@
-#include "ZephyrEvents.h"
+#include "ArduinoEvents.h"
 
 #include <algorithm>
 #include <any>
@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace zephyr_events {
+namespace arduino_events {
 namespace {
 
 uint64_t nowMs() {
@@ -671,5 +671,5 @@ bool Runtime::enqueue(std::function<void()> callback) {
 	return true;
 }
 
-}  // namespace zephyr_events
+}  // namespace arduino_events
 

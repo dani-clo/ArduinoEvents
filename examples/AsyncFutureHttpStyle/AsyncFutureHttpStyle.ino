@@ -1,6 +1,6 @@
-#include <ZephyrEvents.h>
+#include <ArduinoEvents.h>
 
-using namespace zephyr_events;
+using namespace arduino_events;
 
 struct HttpLikeResponse {
   int status = -1;
@@ -54,7 +54,7 @@ void setup() {
   Config cfg;
   cfg.eventQueueCapacity = 32;
   cfg.workerThreadCount = 1;
-  zephyr_events::begin(cfg);
+  arduino_events::begin(cfg);
 
   wifiSub = Async().on<WifiConnected>([](const WifiConnected& ev) {
     Serial.print("WiFi connected: ");
@@ -95,5 +95,5 @@ void setup() {
 
 void loop() {
   // All callbacks are dispatched here without user-managed threads.
-  zephyr_events::update();
+  arduino_events::update();
 }

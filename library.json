@@ -1,7 +1,7 @@
 {
-  "name": "ZephyrEvents",
-  "keywords": "Zephyr,events",
-  "description": "Arduino class to implement and use events in Zephyr.",
+  "name": "ArduinoEvents",
+  "keywords": "Zephyr,asynchronous,asynch,events",
+  "description": "Arduino class to implement and use asynchronous events in Zephyr.",
   "authors":
   [
     {
@@ -13,11 +13,11 @@
   "repository":
   {
     "type": "git",
-    "url": "https://github.com/dani-clo/ZephyrEvents.git"
+    "url": "https://github.com/dani-clo/ArduinoEvents.git"
   },
   "version": "0.1.0",
   "license": "MIT",
   "frameworks": "*",
   "platforms": "*",
-  "headers": "ZephyrEvents.h"
+  "headers": "ArduinoEvents.h"
 }
