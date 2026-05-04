@@ -14,6 +14,8 @@
 #endif
 
 namespace arduino_events {
+
+Runtime& Events = Runtime::instance();
 namespace {
 
 template <typename MutexT>
@@ -283,19 +285,19 @@ const Error& Result<void>::error() const {
 	return error_;
 }
 
-Future<void>& Future<void>::then(SuccessHandler onSuccess) {
+Future<void>& Future<void>::onDone(SuccessHandler onSuccess) {
 	Runtime::instance().futureOnSuccess(token_, [handler = std::move(onSuccess)](const std::any&) {
 		handler();
 	});
 	return *this;
 }
 
-Future<void>& Future<void>::catchError(ErrorHandler onError) {
+Future<void>& Future<void>::onError(ErrorHandler onError) {
 	Runtime::instance().futureOnError(token_, std::move(onError));
 	return *this;
 }
 
-Future<void>& Future<void>::finally(FinallyHandler onFinally) {
+Future<void>& Future<void>::onFinish(FinallyHandler onFinally) {
 	Runtime::instance().futureOnFinally(token_, std::move(onFinally));
 	return *this;
 }
@@ -547,7 +549,7 @@ bool Runtime::emitRaw(size_t eventTypeId, const void* eventData, size_t eventSiz
 	return true;
 }
 
-bool Runtime::off(Subscription subscription) {
+bool Runtime::unlisten(Subscription subscription) {
 	if (!subscription) {
 		return false;
 	}
@@ -649,7 +651,7 @@ bool Runtime::cancelTimer(uint32_t timerId) {
 	return false;
 }
 
-Future<void> Runtime::run(std::function<void()> job) {
+Future<void> Runtime::runAsync(std::function<void()> job) {
 	const uint32_t token = allocFutureToken();
 	if (token == 0) {
 		return Future<void>();
@@ -671,7 +673,7 @@ Future<void> Runtime::run(std::function<void()> job) {
 	return Future<void>(token);
 }
 
-Future<void> Runtime::defer(std::function<void(Deferred<void>)> start) {
+Future<void> Runtime::runAsync(std::function<void(Deferred<void>)> start) {
 	const uint32_t token = allocFutureToken();
 	if (token == 0) {
 		return Future<void>();

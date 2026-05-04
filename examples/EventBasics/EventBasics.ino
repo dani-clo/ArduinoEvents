@@ -33,17 +33,17 @@ void onBootOnce(const BootDone& ev) {
 
 void emitButtonEvent() {
   buttonCounter++;
-  Async().emit(ButtonPressed{buttonCounter});
+  Events.post(ButtonPressed{buttonCounter});
 }
 
 void unsubscribeB() {
-  bool removed = Async().off(subB);
+  bool removed = Events.unlisten(subB);
   Serial.print("Unsubscribe B: ");
   Serial.println(removed ? "ok" : "failed");
 }
 
 void emitBootAgain() {
-  Async().emit(BootDone{true});
+  Events.post(BootDone{true});
 }
 
 void setup() {
@@ -54,16 +54,16 @@ void setup() {
   cfg.workerQueueCapacity = 8;
   arduino_events::begin(cfg);
 
-  subA = Async().on<ButtonPressed>(onButtonA);
-  subB = Async().on<ButtonPressed>(onButtonB);
-  subOnce = Async().once<BootDone>(onBootOnce);
+  subA = Events.listen<ButtonPressed>(onButtonA);
+  subB = Events.listen<ButtonPressed>(onButtonB);
+  subOnce = Events.listenOnce<BootDone>(onBootOnce);
 
-  Async().emit(BootDone{true});
-  Async().emit(BootDone{true});
+  Events.post(BootDone{true});
+  Events.post(BootDone{true});
 
-  Async().every(1000, emitButtonEvent);
-  Async().after(4500, unsubscribeB);
-  Async().after(5500, emitBootAgain);
+  Events.every(1000, emitButtonEvent);
+  Events.after(4500, unsubscribeB);
+  Events.after(5500, emitBootAgain);
 }
 
 void loop() {

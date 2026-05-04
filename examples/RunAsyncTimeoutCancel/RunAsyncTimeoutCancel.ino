@@ -30,17 +30,17 @@ void completeCancellableRequest() {
 
 void startSuccess(Deferred<int> d) {
   successDeferred = d;
-  Async().after(300, completeSuccessRequest);
+  Events.after(300, completeSuccessRequest);
 }
 
 void startTimeout(Deferred<int> d) {
   timeoutDeferred = d;
-  Async().after(1500, completeLateRequest);
+  Events.after(1500, completeLateRequest);
 }
 
 void startCancelable(Deferred<int> d) {
   cancelDeferred = d;
-  Async().after(1000, completeCancellableRequest);
+  Events.after(1000, completeCancellableRequest);
 }
 
 void cancelRequestNow() {
@@ -83,15 +83,15 @@ void setup() {
   cfg.workerQueueCapacity = 8;
   arduino_events::begin(cfg);
 
-  successFuture = Async().defer<int>(startSuccess);
-  successFuture.then(onSuccessValue).catchError(onFutureError).finally(onDone);
+  successFuture = Events.runAsync<int>(startSuccess);
+  successFuture.onDone(onSuccessValue).onError(onFutureError).onFinish(onDone);
 
-  timeoutFuture = Async().defer<int>(startTimeout);
-  timeoutFuture.withTimeout(500).then(onTimeoutValue).catchError(onFutureError).finally(onDone);
+  timeoutFuture = Events.runAsync<int>(startTimeout);
+  timeoutFuture.withTimeout(500).onDone(onTimeoutValue).onError(onFutureError).onFinish(onDone);
 
-  cancelFuture = Async().defer<int>(startCancelable);
-  cancelFuture.then(onCancelValue).catchError(onFutureError).finally(onDone);
-  Async().after(200, cancelRequestNow);
+  cancelFuture = Events.runAsync<int>(startCancelable);
+  cancelFuture.onDone(onCancelValue).onError(onFutureError).onFinish(onDone);
+  Events.after(200, cancelRequestNow);
 }
 
 void loop() {

@@ -16,14 +16,14 @@ void onHeartbeat() {
   Serial.println(heartbeatCount);
 
   if (heartbeatCount >= 5) {
-    bool ok = Async().cancelTimer(heartbeatTimerId);
+    bool ok = Events.cancelTimer(heartbeatTimerId);
     Serial.print("Heartbeat timer cancelled: ");
     Serial.println(ok ? "yes" : "no");
   }
 }
 
 void cancelOneShotBeforeFire() {
-  bool ok = Async().cancelTimer(oneShotTimerId);
+  bool ok = Events.cancelTimer(oneShotTimerId);
   Serial.print("One-shot cancelled before firing: ");
   Serial.println(ok ? "yes" : "no");
 }
@@ -36,10 +36,10 @@ void setup() {
   cfg.workerQueueCapacity = 8;
   arduino_events::begin(cfg);
 
-  oneShotTimerId = Async().after(3000, onOneShot);
-  heartbeatTimerId = Async().every(1000, onHeartbeat);
+  oneShotTimerId = Events.after(3000, onOneShot);
+  heartbeatTimerId = Events.every(1000, onHeartbeat);
 
-  Async().after(1500, cancelOneShotBeforeFire);
+  Events.after(1500, cancelOneShotBeforeFire);
 }
 
 void loop() {

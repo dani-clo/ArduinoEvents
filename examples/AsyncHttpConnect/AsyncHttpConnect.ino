@@ -95,14 +95,14 @@ void completeHttpRequest() {
 void startHttpRequest(Deferred<HttpLikeResponse> request) {
   requestCtx.deferred = request;
   requestCtx.active = true;
-  Async().after(200, completeHttpRequest);
+  Events.after(200, completeHttpRequest);
 }
 
 // Example adapter: in real use this wraps a board/client-specific HTTP library.
 Future<HttpLikeResponse> httpGetAsync(const String& url, uint32_t timeoutMs = 5000) {
   requestCtx.url = url;
   requestCtx.timeoutMs = timeoutMs;
-  return Async().defer<HttpLikeResponse>(startHttpRequest);
+  return Events.runAsync<HttpLikeResponse>(startHttpRequest);
 }
 
 void onWifiConnected(const WifiConnected& ev) {
@@ -110,15 +110,15 @@ void onWifiConnected(const WifiConnected& ev) {
   Serial.println(ev.ssid);
 
   pending = httpGetAsync("https://api.example.com/telemetry", 2000)
-                .then(onTelemetrySuccess)
-                .catchError(onTelemetryError)
-                .finally(onRequestCompleted);
+                .onDone(onTelemetrySuccess)
+                .onError(onTelemetryError)
+                .onFinish(onRequestCompleted);
 }
 
 void emitWifiConnected() {
   WifiConnected ev;
   ev.ssid = WiFi.SSID();
-  Async().emit(ev);
+  Events.post(ev);
 }
 
 void checkWifiConnection() {
@@ -129,7 +129,7 @@ void checkWifiConnection() {
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnectedEventSent = true;
     if (wifiPollTimerId != 0) {
-      Async().cancelTimer(wifiPollTimerId);
+      Events.cancelTimer(wifiPollTimerId);
       wifiPollTimerId = 0;
     }
     emitWifiConnected();
@@ -138,8 +138,8 @@ void checkWifiConnection() {
 
 void runHealthCheck() {
   httpGetAsync("https://api.example.com/health", 3000)
-      .then(onHealthSuccess)
-      .catchError(onHealthError);
+      .onDone(onHealthSuccess)
+      .onError(onHealthError);
 }
 
 void setup() {
@@ -151,17 +151,17 @@ void setup() {
   arduino_events::begin(cfg);
 
   requestCtx.active = false;
-  wifiSub = Async().on<WifiConnected>(onWifiConnected);
+  wifiSub = Events.listen<WifiConnected>(onWifiConnected);
 
   Serial.print("Connecting to WiFi: ");
   Serial.println(ssid);
   WiFi.begin(ssid, pass);
 
   // Poll connection state and emit WifiConnected only when really connected.
-  wifiPollTimerId = Async().every(500, checkWifiConnection);
+  wifiPollTimerId = Events.every(500, checkWifiConnection);
 
   // Periodic async workflow example.
-  Async().every(10000, runHealthCheck);
+  Events.every(10000, runHealthCheck);
 }
 
 void loop() {

@@ -30,19 +30,19 @@ void printState() {
 }
 
 void scheduleConnectOk() {
-  Async().emit(ConnectOkEvent{});
+  Events.post(ConnectOkEvent{});
 }
 
 void scheduleConnectFail() {
-  Async().emit(ConnectFailEvent{});
+  Events.post(ConnectFailEvent{});
 }
 
 void scheduleReset() {
-  Async().emit(ResetEvent{});
+  Events.post(ResetEvent{});
 }
 
 void scheduleStartConnect() {
-  Async().emit(StartConnectEvent{});
+  Events.post(StartConnectEvent{});
 }
 
 void onStartConnect(const StartConnectEvent&) {
@@ -54,7 +54,7 @@ void onStartConnect(const StartConnectEvent&) {
   Serial.println("Starting connection...");
   printState();
 
-  Async().after(1000, scheduleConnectOk);
+  Events.after(1000, scheduleConnectOk);
 }
 
 void onConnectOk(const ConnectOkEvent&) {
@@ -66,7 +66,7 @@ void onConnectOk(const ConnectOkEvent&) {
   Serial.println("Connection OK");
   printState();
 
-  Async().after(2500, scheduleConnectFail);
+  Events.after(2500, scheduleConnectFail);
 }
 
 void onConnectFail(const ConnectFailEvent&) {
@@ -78,7 +78,7 @@ void onConnectFail(const ConnectFailEvent&) {
   Serial.println("Connection failed");
   printState();
 
-  Async().after(1500, scheduleReset);
+  Events.after(1500, scheduleReset);
 }
 
 void onReset(const ResetEvent&) {
@@ -86,7 +86,7 @@ void onReset(const ResetEvent&) {
   Serial.println("Reset done");
   printState();
 
-  Async().after(1000, scheduleStartConnect);
+  Events.after(1000, scheduleStartConnect);
 }
 
 void setup() {
@@ -97,13 +97,13 @@ void setup() {
   cfg.workerQueueCapacity = 8;
   arduino_events::begin(cfg);
 
-  Async().on<StartConnectEvent>(onStartConnect);
-  Async().on<ConnectOkEvent>(onConnectOk);
-  Async().on<ConnectFailEvent>(onConnectFail);
-  Async().on<ResetEvent>(onReset);
+  Events.listen<StartConnectEvent>(onStartConnect);
+  Events.listen<ConnectOkEvent>(onConnectOk);
+  Events.listen<ConnectFailEvent>(onConnectFail);
+  Events.listen<ResetEvent>(onReset);
 
   printState();
-  Async().after(500, scheduleStartConnect);
+  Events.after(500, scheduleStartConnect);
 }
 
 void loop() {

@@ -83,9 +83,9 @@ class Future {
 
 	Future() = default;
 
-	Future<T>& then(SuccessHandler onSuccess);
-	Future<T>& catchError(ErrorHandler onError);
-	Future<T>& finally(FinallyHandler onFinally);
+	Future<T>& onDone(SuccessHandler handler);
+	Future<T>& onError(ErrorHandler handler);
+	Future<T>& onFinish(FinallyHandler handler);
 	Future<T>& withTimeout(uint32_t timeoutMs);
 
 	bool cancel();
@@ -111,9 +111,9 @@ class Future<void> {
 
 	Future() = default;
 
-	Future<void>& then(SuccessHandler onSuccess);
-	Future<void>& catchError(ErrorHandler onError);
-	Future<void>& finally(FinallyHandler onFinally);
+	Future<void>& onDone(SuccessHandler handler);
+	Future<void>& onError(ErrorHandler handler);
+	Future<void>& onFinish(FinallyHandler handler);
 	Future<void>& withTimeout(uint32_t timeoutMs);
 
 	bool cancel();
@@ -183,47 +183,46 @@ class Runtime {
 	void update(uint32_t budgetMs = 0);
 
 	template <typename EventT>
-	Subscription on(EventHandler<EventT> handler) {
+	Subscription listen(EventHandler<EventT> handler) {
 		return registerHandler(typeId<EventT>(),
-													 [handler = std::move(handler)](const void* rawEvent) {
-														 handler(*static_cast<const EventT*>(rawEvent));
-													 },
-													 false);
+											 [handler = std::move(handler)](const void* rawEvent) {
+												 handler(*static_cast<const EventT*>(rawEvent));
+											 },
+											 false);
 	}
 
 	template <typename EventT>
-	Subscription once(EventHandler<EventT> handler) {
+	Subscription listenOnce(EventHandler<EventT> handler) {
 		return registerHandler(typeId<EventT>(),
-													 [handler = std::move(handler)](const void* rawEvent) {
-														 handler(*static_cast<const EventT*>(rawEvent));
-													 },
-													 true);
+											 [handler = std::move(handler)](const void* rawEvent) {
+												 handler(*static_cast<const EventT*>(rawEvent));
+											 },
+											 true);
 	}
 
 	template <typename EventT>
-	bool emit(const EventT& event) {
+	bool post(const EventT& event) {
 		return emitRaw(typeId<EventT>(), static_cast<const void*>(&event), sizeof(EventT));
 	}
 
-	bool off(Subscription subscription);
-
+	bool unlisten(Subscription subscription);
 	uint32_t after(uint32_t delayMs, std::function<void()> callback);
 	uint32_t every(uint32_t periodMs, std::function<void()> callback);
 	bool cancelTimer(uint32_t timerId);
 
 	template <typename T>
-	Future<T> run(std::function<T()> job) {
+	Future<T> runAsync(std::function<T()> job) {
 		return submitJob<T>(std::move(job));
 	}
 
-	Future<void> run(std::function<void()> job);
+	Future<void> runAsync(std::function<void()> job);
 
 	template <typename T>
-	Future<T> defer(std::function<void(Deferred<T>)> start) {
+	Future<T> runAsync(std::function<void(Deferred<T>)> start) {
 		return createDeferred<T>(std::move(start));
 	}
 
-	Future<void> defer(std::function<void(Deferred<void>)> start);
+	Future<void> runAsync(std::function<void(Deferred<void>)> start);
 
 	// Internal hooks used by Future/Deferred templates.
 	void futureOnSuccess(uint32_t token, std::function<void(const std::any&)> onSuccess);
@@ -263,11 +262,11 @@ class Runtime {
 	Future<T> createDeferred(std::function<void(Deferred<T>)> start);
 };
 
-// Convenient global accessor for sketches.
-inline Runtime& Async() { return Runtime::instance(); }
+// Global Events object — use like Serial, Wire, WiFi.
+extern Runtime& Events;
 
-inline bool begin(const Config& config = {}) { return Async().begin(config); }
-inline void update(uint32_t budgetMs = 0) { Async().update(budgetMs); }
+inline bool begin(const Config& config = {}) { return Events.begin(config); }
+inline void update(uint32_t budgetMs = 0) { Events.update(budgetMs); }
 
 template <typename T>
 Result<T> Result<T>::ok(T value) {
@@ -306,23 +305,23 @@ const Error& Result<T>::error() const {
 }
 
 template <typename T>
-Future<T>& Future<T>::then(SuccessHandler onSuccess) {
+Future<T>& Future<T>::onDone(SuccessHandler handler) {
 	Runtime::instance().futureOnSuccess(
-		token_, [handler = std::move(onSuccess)](const std::any& value) {
+		token_, [handler = std::move(handler)](const std::any& value) {
 			handler(std::any_cast<const T&>(value));
 		});
 	return *this;
 }
 
 template <typename T>
-Future<T>& Future<T>::catchError(ErrorHandler onError) {
-	Runtime::instance().futureOnError(token_, std::move(onError));
+Future<T>& Future<T>::onError(ErrorHandler handler) {
+	Runtime::instance().futureOnError(token_, std::move(handler));
 	return *this;
 }
 
 template <typename T>
-Future<T>& Future<T>::finally(FinallyHandler onFinally) {
-	Runtime::instance().futureOnFinally(token_, std::move(onFinally));
+Future<T>& Future<T>::onFinish(FinallyHandler handler) {
+	Runtime::instance().futureOnFinally(token_, std::move(handler));
 	return *this;
 }
 
