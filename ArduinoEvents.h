@@ -211,13 +211,6 @@ class Runtime {
 	bool cancelTimer(uint32_t timerId);
 
 	template <typename T>
-	Future<T> runAsync(std::function<T()> job) {
-		return submitJob<T>(std::move(job));
-	}
-
-	Future<void> runAsync(std::function<void()> job);
-
-	template <typename T>
 	Future<T> runAsync(std::function<void(Deferred<T>)> start) {
 		return createDeferred<T>(std::move(start));
 	}
@@ -254,9 +247,7 @@ class Runtime {
 	bool emitRaw(size_t eventTypeId, const void* eventData, size_t eventSize);
 	uint32_t allocFutureToken();
 	bool enqueue(std::function<void()> callback);
-
-	template <typename T>
-	Future<T> submitJob(std::function<T()> job);
+	bool enqueueWorker(std::function<void()> callback);
 
 	template <typename T>
 	Future<T> createDeferred(std::function<void(Deferred<T>)> start);
@@ -385,40 +376,18 @@ bool Deferred<T>::isCancelled() const {
 }
 
 template <typename T>
-Future<T> Runtime::submitJob(std::function<T()> job) {
-	const uint32_t token = allocFutureToken();
-	if (token == 0) {
-		return Future<T>();
-	}
-
-	if (!enqueue([this, token, job = std::move(job)]() mutable {
-		if (futureIsCancelled(token)) {
-			return;
-		}
-		futureResolveAny(token, std::any(job()));
-	})) {
-		Error err;
-		err.code = ErrorCode::QueueFull;
-		err.message = "runtime queue full";
-		futureReject(token, std::move(err));
-	}
-
-	return Future<T>(token);
-}
-
-template <typename T>
 Future<T> Runtime::createDeferred(std::function<void(Deferred<T>)> start) {
 	const uint32_t token = allocFutureToken();
 	if (token == 0) {
 		return Future<T>();
 	}
 
-	if (!enqueue([start = std::move(start), token]() mutable {
+	if (!enqueueWorker([start = std::move(start), token]() mutable {
 		start(Deferred<T>(token));
 	})) {
 		Error err;
 		err.code = ErrorCode::QueueFull;
-		err.message = "runtime queue full";
+		err.message = "worker queue full";
 		futureReject(token, std::move(err));
 	}
 

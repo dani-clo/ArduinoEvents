@@ -16,6 +16,15 @@
 namespace arduino_events {
 
 Runtime& Events = Runtime::instance();
+
+namespace {
+constexpr size_t kMaxWorkerThreads = 4;
+constexpr size_t kWorkerStackSize = 3072;
+K_THREAD_STACK_ARRAY_DEFINE(g_workerStacks, kMaxWorkerThreads, kWorkerStackSize);
+struct k_work_q g_workerQueues[kMaxWorkerThreads];
+bool g_workerQueueStarted[kMaxWorkerThreads] = {false, false, false, false};
+}  // namespace
+
 namespace {
 
 template <typename MutexT>
@@ -67,6 +76,11 @@ struct RuntimeMutex {
 		std::function<void()> callback;
 	};
 
+	struct WorkerJob {
+		struct k_work work;
+		std::function<void()> callback;
+	};
+
 	void invokeCallbackPayload(void* context) {
 		auto* payload = static_cast<CallbackPayload*>(context);
 		payload->callback();
@@ -76,6 +90,16 @@ struct RuntimeMutex {
 		auto* payload = static_cast<CallbackPayload*>(context);
 		payload->~CallbackPayload();
 		k_free(payload);
+	}
+
+	void workerJobHandler(struct k_work* work) {
+		auto* job = CONTAINER_OF(work, WorkerJob, work);
+		auto callback = std::move(job->callback);
+		job->~WorkerJob();
+		k_free(job);
+		if (callback) {
+			callback();
+		}
 	}
 
 	struct TimerEntry {
@@ -128,6 +152,8 @@ struct RuntimeState {
 	uint32_t nextTimerId = 1;
 	uint32_t nextFutureToken = 1;
 	uint32_t timerGeneration = 0;
+	size_t workerQueueCount = 1;
+	uint32_t nextWorkerQueue = 0;
 
 	std::vector<HandlerEntry> handlers;
 	std::vector<std::unique_ptr<TimerEntry>> timers;
@@ -369,6 +395,25 @@ bool Runtime::begin(const Config& config) {
 	}
 	if (state.config.workerQueueCapacity == 0) {
 		state.config.workerQueueCapacity = 1;
+	}
+	if (state.config.workerThreadCount == 0) {
+		state.config.workerThreadCount = 1;
+	}
+
+	state.workerQueueCount = static_cast<size_t>(state.config.workerThreadCount);
+	if (state.workerQueueCount > kMaxWorkerThreads) {
+		state.workerQueueCount = kMaxWorkerThreads;
+	}
+	state.nextWorkerQueue = 0;
+
+	for (size_t i = 0; i < state.workerQueueCount; ++i) {
+		if (g_workerQueueStarted[i]) {
+			continue;
+		}
+		k_work_queue_start(&g_workerQueues[i], g_workerStacks[i],
+									 K_THREAD_STACK_SIZEOF(g_workerStacks[i]),
+									 CONFIG_SYSTEM_WORKQUEUE_PRIORITY, nullptr);
+		g_workerQueueStarted[i] = true;
 	}
 
 	const size_t msgSize = sizeof(QueuedCallback);
@@ -651,38 +696,18 @@ bool Runtime::cancelTimer(uint32_t timerId) {
 	return false;
 }
 
-Future<void> Runtime::runAsync(std::function<void()> job) {
-	const uint32_t token = allocFutureToken();
-	if (token == 0) {
-		return Future<void>();
-	}
-
-	if (!enqueue([this, token, job = std::move(job)]() mutable {
-		if (futureIsCancelled(token)) {
-			return;
-		}
-		job();
-		futureResolveAny(token, std::any());
-	})) {
-		Error err;
-		err.code = ErrorCode::QueueFull;
-		err.message = "runtime queue full";
-		futureReject(token, std::move(err));
-	}
-
-	return Future<void>(token);
-}
-
 Future<void> Runtime::runAsync(std::function<void(Deferred<void>)> start) {
 	const uint32_t token = allocFutureToken();
 	if (token == 0) {
 		return Future<void>();
 	}
 
-	if (!enqueue([start = std::move(start), token]() mutable { start(Deferred<void>(token)); })) {
+	if (!enqueueWorker([start = std::move(start), token]() mutable {
+		start(Deferred<void>(token));
+	})) {
 		Error err;
 		err.code = ErrorCode::QueueFull;
-		err.message = "runtime queue full";
+		err.message = "worker queue full";
 		futureReject(token, std::move(err));
 	}
 
@@ -873,6 +898,36 @@ bool Runtime::enqueue(std::function<void()> callback) {
 	}
 
 	return pushCallbackLocked(state, std::move(callback));
+}
+
+bool Runtime::enqueueWorker(std::function<void()> callback) {
+	auto& state = rt();
+	uint32_t queueIndex = 0;
+
+	{
+		LockGuard<RuntimeMutex> lock(state.mutex);
+		if (!state.running || state.workerQueueCount == 0) {
+			return false;
+		}
+		queueIndex = state.nextWorkerQueue++ % state.workerQueueCount;
+	}
+
+	void* raw = k_malloc(sizeof(WorkerJob));
+	if (raw == nullptr) {
+		return false;
+	}
+
+	auto* job = new (raw) WorkerJob{};
+	job->callback = std::move(callback);
+	k_work_init(&job->work, workerJobHandler);
+
+	if (k_work_submit_to_queue(&g_workerQueues[queueIndex], &job->work) < 0) {
+		job->~WorkerJob();
+		k_free(job);
+		return false;
+	}
+
+	return true;
 }
 
 }  // namespace arduino_events
