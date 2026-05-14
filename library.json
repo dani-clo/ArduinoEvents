@@ -1,7 +1,7 @@
 {
-  "name": "ArduinoEvents",
-  "keywords": "Zephyr,asynchronous,asynch,events",
-  "description": "Arduino class to implement and use asynchronous events in Zephyr.",
+  "name": "RunAsyncEvents",
+  "keywords": "Asynchronous, asynch, events, future, promise, timers, zephyr",
+  "description": "Arduino library to implement and use asynchronous events in Zephyr.",
   "authors":
   [
     {
@@ -19,5 +19,5 @@
   "license": "MIT",
   "frameworks": "*",
   "platforms": "*",
-  "headers": "ArduinoEvents.h"
+  "headers": "RunAsyncEvents.h"
 }

@@ -1,13 +1,8 @@
 # ArduinoEvents
 
-Library to manage events, timers, and async operations in Arduino sketches with a simple flow:
+A lightweight event-driven library for Arduino. It provides a simple way to register callbacks and emit events, manage timers and async operations in Arduino sketches with a simple flow.
 
-- define events as `struct`
-- register callbacks with `Events.listen(...)`
-- publish events with `Events.post(...)`
-- call `arduino_events::update()` in `loop()`
-
-The goal is to avoid blocking code and keep your sketch clean when multiple activities run in parallel.
+The goal is to avoid blocking code and keep your sketch loop() clean when multiple activities run in parallel.
 
 ## Who Is It For
 
@@ -17,6 +12,14 @@ This library is useful when you want to:
 - run periodic or delayed actions (`every`, `after`)
 - start an async task and receive the result later (`runAsync`)
 - handle timeouts and cancellation
+
+Avoid using it if:
+
+- you only need simple timing (millis())
+- you are dealing directly with hardware interrupts
+
+Unlike task schedulers or input-specific libraries, ArduinoEvents is a
+general-purpose event system.
 
 ## Requirements
 
