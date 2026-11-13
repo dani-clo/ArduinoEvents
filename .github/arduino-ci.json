@@ -1,0 +1,40 @@
+{
+  "versions": ["1.0.0"],
+  "targets": [
+    {
+      "id": "giga",
+      "fqbn": "arduino:zephyr_main:giga",
+      "examples": {"include": ["*"], "exclude": []}
+    },
+    {
+      "id": "nano33ble",
+      "fqbn": "arduino:zephyr_main:nano33ble",
+      "examples": {"include": ["*"], "exclude": ["AsyncHttpConnect"]}
+    },
+    {
+      "id": "nicla_vision",
+      "fqbn": "arduino:zephyr_main:nicla_vision",
+      "examples": {"include": ["*"], "exclude": []}
+    },
+    {
+      "id": "portentah7",
+      "fqbn": "arduino:zephyr_main:portentah7",
+      "examples": {"include": ["*"], "exclude": []}
+    },
+    {
+      "id": "portentac33",
+      "fqbn": "arduino:zephyr_main:portentac33",
+      "examples": {"include": ["*"], "exclude": []}
+    },
+    {
+      "id": "unoq",
+      "fqbn": "arduino:zephyr:unoq",
+      "examples": {"include": ["*"], "exclude": ["AsyncHttpConnect"]}
+    },
+    {
+      "id": "ventunoq",
+      "fqbn": "arduino:zephyr:ventunoq",
+      "examples": {"include": ["*"], "exclude": ["AsyncHttpConnect"]}
+    }
+  ]
+}

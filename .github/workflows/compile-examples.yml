@@ -1,0 +1,53 @@
+name: Compile Zephyr examples
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  configure:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.configure.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test CI configuration and failure reporting
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+      - name: Validate configuration and generate matrix
+        id: configure
+        run: python3 .github/scripts/arduino_ci.py matrix --github-output "$GITHUB_OUTPUT"
+
+  compile:
+    needs: configure
+    name: ${{ matrix.target }} / ${{ matrix.version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+        with:
+          version: "1.5.1"
+      - name: Install core and compile selected examples
+        env:
+          CI_TARGET: ${{ matrix.target }}
+          CI_VERSION: ${{ matrix.version }}
+        run: >-
+          python3 .github/scripts/arduino_ci.py build
+          --target "$CI_TARGET" --version "$CI_VERSION"
+          --report-dir "$RUNNER_TEMP/arduino-reports"
+          --build-dir "$RUNNER_TEMP/arduino-build"
+      - name: Save logs and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arduino-${{ matrix.target }}-${{ matrix.version }}
+          path: ${{ runner.temp }}/arduino-reports/
+          if-no-files-found: warn
+          retention-days: 14
