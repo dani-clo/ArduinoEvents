@@ -16,8 +16,8 @@
     "url": "https://github.com/dani-clo/ArduinoEvents.git"
   },
   "version": "0.1.0",
-  "license": "MIT",
-  "frameworks": "*",
+  "license": "Apache-2.0",
+  "frameworks": "arduino",
   "platforms": "*",
   "headers": "RunAsyncEvents.h"
 }

@@ -1,4 +1,4 @@
-# ArduinoEvents
+# RunAsyncEvents
 
 A lightweight event-driven library for Arduino. It provides a simple way to register callbacks and emit events, manage timers and async operations in Arduino sketches with a simple flow.
 
@@ -18,13 +18,13 @@ Avoid using it if:
 - you only need simple timing (millis())
 - you are dealing directly with hardware interrupts
 
-Unlike task schedulers or input-specific libraries, ArduinoEvents is a
+Unlike task schedulers or input-specific libraries, RunAsyncEvents is a
 general-purpose event system.
 
 ## Requirements
 
-- Supported architecture: `zephyr` (see `library.properties`)
-- Main include: `#include <ArduinoEvents.h>`
+- Supported architectures: `zephyr`, `zephyr_main`, `zephyr_contrib` (see `library.properties`)
+- Main include: `#include <RunAsyncEvents.h>`
 
 ## Quick Start
 
@@ -35,7 +35,7 @@ general-purpose event system.
 Minimal example:
 
 ```cpp
-#include <ArduinoEvents.h>
+#include <RunAsyncEvents.h>
 
 using namespace arduino_events;
 
